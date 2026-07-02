@@ -62,14 +62,14 @@ module.exports = {
     async execute(interaction) {
         // Defer reply as role operations may take time
         await interaction.deferReply({ flags: 64 });
-        
+
         try {
             const targetRole = interaction.options.getRole('role');
             const style = interaction.options.getString('style');
             const color1Hex = interaction.options.getString('color1');
             const color2Hex = interaction.options.getString('color2');
             const emoji = interaction.options.getString('emoji');
- 
+
             let payloadColors;
             let responseLines = [];
 
@@ -212,7 +212,7 @@ module.exports = {
                         const emojiId = customEmojiMatch[1];
                         // Construct the public Discord CDN URL for the custom emoji
                         const emojiUrl = `https://cdn.discordapp.com/emojis/${emojiId}.png`;
-                        
+
                         iconPayload = emojiUrl;
                         unicodeEmojiPayload = null;
                         responseLines.push(`✨ **Role icon custom emoji set!**`);
@@ -232,14 +232,14 @@ module.exports = {
                 rolePayload.icon = iconPayload;
                 rolePayload.unicodeEmoji = unicodeEmojiPayload;
             }
-            
+
             console.log('🎨 Rolecolor Payload:', {
                 ...rolePayload,
                 icon: iconPayload ? iconPayload.id || iconPayload : null
             });
-            
+
             await colorRole.edit(rolePayload);
-            
+
             await interaction.editReply({ content: responseLines.join('\n') });
 
         } catch (error) {

@@ -37,7 +37,7 @@ module.exports = {
         }
 
         const roleIds = Array.from(message.member?.roles?.cache?.keys?.() || []);
-        const canUse = message.client.accessControl?.canUse(command.name, message.author.id, roleIds) || message.author.id === config.ownerId;
+        const canUse = message.client.accessControl?.canUse(message.guildId, command.name, message.author.id, roleIds) || message.author.id === config.ownerId;
 
         if (!canUse) {
             return;

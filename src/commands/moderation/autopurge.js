@@ -61,6 +61,11 @@ module.exports = {
                         .addChannelTypes(ChannelType.GuildText)
                         .setRequired(true)
                 )
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('remove-all')
+                .setDescription('Remove/Delete all autopurge settings for all channels in the server')
         ),
 
     async execute(interaction) {
@@ -84,6 +89,8 @@ module.exports = {
             await this.handleResume(interaction);
         } else if (subcommand === 'remove') {
             await this.handleRemove(interaction);
+        } else if (subcommand === 'remove-all') {
+            await this.handleRemoveAll(interaction);
         }
     },
 
@@ -149,7 +156,8 @@ module.exports = {
                 { label: 'Embed', value: 'embed', description: 'Purge rich embeds', emoji: '💻' },
                 { label: 'Sound', value: 'sound', description: 'Purge audio files and voice messages', emoji: '🎵' },
                 { label: 'Poll', value: 'poll', description: 'Purge polls', emoji: '📊' },
-                { label: 'Sticker', value: 'sticker', description: 'Purge stickers', emoji: '🏷️' }
+                { label: 'Sticker', value: 'sticker', description: 'Purge stickers', emoji: '🏷️' },
+                { label: 'Emoji', value: 'emoji', description: 'Purge messages containing emojis', emoji: '😀' }
             ].map(opt => ({
                 ...opt,
                 default: selectedFilters.includes(opt.value)
@@ -159,7 +167,7 @@ module.exports = {
                 .setCustomId('autopurge_setup_filters')
                 .setPlaceholder('Select filters (matches will be deleted)...')
                 .setMinValues(0)
-                .setMaxValues(8)
+                .setMaxValues(9)
                 .addOptions(filterOptions);
 
             // Row 3: Interval select menu
@@ -452,5 +460,90 @@ module.exports = {
             .setTimestamp();
 
         return interaction.reply({ embeds: [embed] });
+    },
+
+    async handleRemoveAll(interaction) {
+        const db = interaction.client.database;
+        const configs = db.listGuildAutoPurgeConfigs(interaction.guild.id);
+
+        if (configs.length === 0) {
+            return interaction.reply({ 
+                content: '❌ There are no active autopurge configurations in this server to remove.', 
+                flags: 64 
+            });
+        }
+
+        // Create confirmation prompt with buttons
+        const confirmEmbed = new EmbedBuilder()
+            .setTitle('⚠️ REMOVE ALL AUTOPURGE CONFIGURATIONS')
+            .setDescription(`You are about to delete **all ${configs.length}** autopurge configurations in this server!\n\nThis action **cannot be undone** and will stop all automatic purging.\n\nAre you sure you want to proceed?`)
+            .setColor('#e74c3c')
+            .setFooter({ text: 'This action will time out in 30 seconds' })
+            .setTimestamp();
+
+        const confirmBtn = new ButtonBuilder()
+            .setCustomId('autopurge_remove_all_confirm')
+            .setLabel('Confirm Remove All')
+            .setStyle(ButtonStyle.Danger);
+
+        const cancelBtn = new ButtonBuilder()
+            .setCustomId('autopurge_remove_all_cancel')
+            .setLabel('Cancel')
+            .setStyle(ButtonStyle.Secondary);
+
+        const row = new ActionRowBuilder().addComponents(confirmBtn, cancelBtn);
+
+        const response = await interaction.reply({ 
+            embeds: [confirmEmbed], 
+            components: [row], 
+            flags: 64 
+        });
+
+        const collector = response.createMessageComponentCollector({
+            filter: i => i.user.id === interaction.user.id,
+            time: 30000
+        });
+
+        collector.on('collect', async i => {
+            if (i.customId === 'autopurge_remove_all_confirm') {
+                collector.stop('confirmed');
+
+                // Perform deletion
+                const deletedConfigsCount = db.deleteAllGuildAutoPurgeConfigs(interaction.guild.id);
+                db.removeAllTrackedMessagesForGuild(interaction.guild.id);
+
+                // Reload scheduler configs
+                interaction.client.autoPurgeScheduler?.reloadConfig();
+
+                const successEmbed = new EmbedBuilder()
+                    .setTitle('🗑️ All Autopurge Configs Removed')
+                    .setDescription(`Successfully removed **${deletedConfigsCount}** autopurge configuration(s) and cleared all tracked message records for this server.`)
+                    .setColor('#2ecc71')
+                    .setTimestamp();
+
+                await i.update({ embeds: [successEmbed], components: [] });
+            } else if (i.customId === 'autopurge_remove_all_cancel') {
+                collector.stop('cancelled');
+
+                const cancelEmbed = new EmbedBuilder()
+                    .setTitle('❌ Action Cancelled')
+                    .setDescription('Removal of all autopurge configurations has been cancelled.')
+                    .setColor('#95a5a6')
+                    .setTimestamp();
+
+                await i.update({ embeds: [cancelEmbed], components: [] });
+            }
+        });
+
+        collector.on('end', async (collected, reason) => {
+            if (reason === 'time') {
+                const timeoutEmbed = new EmbedBuilder()
+                    .setTitle('❌ Action Timed Out')
+                    .setDescription('The prompt timed out due to inactivity.')
+                    .setColor('#e74c3c')
+                    .setTimestamp();
+                await interaction.editReply({ embeds: [timeoutEmbed], components: [] }).catch(() => {});
+            }
+        });
     }
 };

@@ -41,6 +41,11 @@ class AutoPurgeEngine {
                     return !!message.poll;
                 case 'sticker':
                     return message.stickers.size > 0;
+                case 'emoji': {
+                    const hasCustomEmoji = /<a?:[a-zA-Z0-9_]+:\d+>/g.test(message.content);
+                    const hasUnicodeEmoji = /\p{Extended_Pictographic}/u.test(message.content);
+                    return hasCustomEmoji || hasUnicodeEmoji;
+                }
                 default:
                     return false;
             }

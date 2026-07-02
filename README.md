@@ -88,6 +88,16 @@ Discord Bot/
    npm start
    ```
 
+### Running with Docker (Persistent Storage)
+
+If you run the bot inside a Docker container, you **must** mount a volume to map the `/usr/src/app/data` directory to persist your settings (autopurge configurations, warnings, access controls, etc.) across restarts.
+
+We have included a [docker-compose.yml](file:///c:/Users/munch/Discord%20Bot%20-%20Copy/docker-compose.yml) to make this easy:
+```bash
+docker compose up --build -d
+```
+This will build the container, start the bot, and automatically map the `./data` directory on your host machine to `/usr/src/app/data` inside the container.
+
 ## Configuration
 
 ### Getting Your IDs

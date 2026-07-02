@@ -21,7 +21,8 @@ const filterChoices = [
     { name: 'Embeds', value: 'embed' },
     { name: 'Sounds/Voice', value: 'sound' },
     { name: 'Polls', value: 'poll' },
-    { name: 'Stickers', value: 'sticker' }
+    { name: 'Stickers', value: 'sticker' },
+    { name: 'Emojis', value: 'emoji' }
 ];
 
 module.exports = {
@@ -300,6 +301,11 @@ module.exports = {
                             return !!msg.poll;
                         case 'sticker':
                             return msg.stickers.size > 0;
+                        case 'emoji': {
+                            const hasCustomEmoji = /<a?:[a-zA-Z0-9_]+:\d+>/g.test(msg.content);
+                            const hasUnicodeEmoji = /\p{Extended_Pictographic}/u.test(msg.content);
+                            return hasCustomEmoji || hasUnicodeEmoji;
+                        }
                         default:
                             return false;
                     }

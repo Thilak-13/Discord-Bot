@@ -1,7 +1,7 @@
 const fs = require('fs/promises');
 const path = require('path');
 
-const TIMERS_PATH = path.join(__dirname, '..', 'data', 'manga-timers.json');
+const TIMERS_PATH = path.join(__dirname, '..', '..', 'data', 'manga-timers.json');
 const UPDATE_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 
 class MangaScheduler {

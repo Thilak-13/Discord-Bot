@@ -94,7 +94,7 @@ function buildAllAccessReport(access, guild, commandNames) {
     const lines = ['**Command Access Infos**', ''];
 
     for (const commandName of commandNames) {
-        lines.push(formatCommandEntry(commandName, access.list(commandName), guild));
+        lines.push(formatCommandEntry(commandName, access.list(guild.id, commandName), guild));
         lines.push('');
     }
 
@@ -189,7 +189,7 @@ module.exports = {
         if (action === 'info' || action === 'infos') {
             const commandName = (args[1] || '').toLowerCase();
             const report = commandName
-                ? formatCommandEntry(commandName, access.list(commandName), message.guild)
+                ? formatCommandEntry(commandName, access.list(message.guild.id, commandName), message.guild)
                 : (() => {
                     const commandNames = Array.from(message.client.commands.keys()).sort((a, b) => a.localeCompare(b));
                     return buildAllAccessReport(access, message.guild, commandNames);
@@ -211,7 +211,7 @@ module.exports = {
                 return message.reply({ embeds: [embed] }).catch(() => {});
             }
 
-            const entry = access.list(commandName);
+            const entry = access.list(message.guild.id, commandName);
             if (!entry) {
                 const embed = createInfoEmbed('No Entries Found', `No access entries found for **${commandName}**.`);
                 return message.reply({ embeds: [embed] }).catch(() => {});
@@ -231,7 +231,7 @@ module.exports = {
                 return message.reply({ embeds: [embed] }).catch(() => {});
             }
 
-            const removed = access.clear(commandName);
+            const removed = access.clear(message.guild.id, commandName);
             if (!removed) {
                 const embed = createInfoEmbed('No Entry', `No access entry existed for **${commandName}**.`);
                 return message.reply({ embeds: [embed] }).catch(() => {});
@@ -269,8 +269,8 @@ module.exports = {
             }
 
             const changed = action === 'grant'
-                ? access.grant(commandName, 'role', role.id)
-                : access.revoke(commandName, 'role', role.id);
+                ? access.grant(message.guild.id, commandName, 'role', role.id)
+                : access.revoke(message.guild.id, commandName, 'role', role.id);
 
             if (!changed) {
                 const embed = createInfoEmbed('No Change', `No change was made for **${commandName}**.`);
@@ -290,8 +290,8 @@ module.exports = {
             }
 
             const changed = action === 'grant'
-                ? access.grant(commandName, 'member', member.id)
-                : access.revoke(commandName, 'member', member.id);
+                ? access.grant(message.guild.id, commandName, 'member', member.id)
+                : access.revoke(message.guild.id, commandName, 'member', member.id);
 
             if (!changed) {
                 const embed = createInfoEmbed('No Change', `No change was made for **${commandName}**.`);

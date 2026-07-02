@@ -153,6 +153,29 @@ All other users will see: "❌ Unauthorized. This bot is private."
 - Monitor with logging service
 - Regular backups if using database
 
+## Running with Docker & Data Persistence
+
+To avoid losing settings (such as autopurge configs, warnings, and command access rules) when the bot restarts or is rebuilt, you **must** mount a persistent volume to map the `/usr/src/app/data` folder to your host system.
+
+### Option A: Using Docker Compose (Recommended)
+We have provided a [docker-compose.yml](file:///c:/Users/munch/Discord%20Bot%20-%20Copy/docker-compose.yml) in the root of the project.
+1. Build and start the bot:
+   ```bash
+   docker compose up --build -d
+   ```
+This automatically maps the `./data` directory on your host machine to `/usr/src/app/data` inside the container.
+
+### Option B: Using Docker CLI
+If running directly via `docker run`, mount the directory as a volume:
+```bash
+docker build -t discord-bot .
+docker run -d \
+  --name discord-bot \
+  --env-file .env \
+  -v "$(pwd)/data:/usr/src/app/data" \
+  discord-bot
+```
+
 ## Need Help?
 
 1. Check console output for errors

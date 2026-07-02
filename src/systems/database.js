@@ -371,6 +371,23 @@ class Database {
     }
 
     /**
+     * Delete all autopurge configurations for a guild
+     */
+    deleteAllGuildAutoPurgeConfigs(guildId) {
+        try {
+            const stmt = this.db.prepare(`
+                DELETE FROM autopurge_configs WHERE guild_id = ?
+            `);
+            const result = stmt.run(guildId);
+            return result.changes;
+        } catch (error) {
+            console.error('❌ Error deleting all guild autopurge configs:', error.message);
+            return 0;
+        }
+    }
+
+
+    /**
      * Update runtime execution stats for autopurge
      */
     updateAutoPurgeRun(guildId, channelId, lastRun, nextRun) {
@@ -442,6 +459,20 @@ class Database {
             return false;
         }
     }
+
+    /**
+     * Remove all tracked messages for a guild
+     */
+    removeAllTrackedMessagesForGuild(guildId) {
+        try {
+            this.db.prepare('DELETE FROM autopurge_tracked_messages WHERE guild_id = ?').run(guildId);
+            return true;
+        } catch (error) {
+            console.error('❌ Error removing all tracked messages for guild:', error.message);
+            return false;
+        }
+    }
+
 
     listAllTrackedMessages() {
         try {

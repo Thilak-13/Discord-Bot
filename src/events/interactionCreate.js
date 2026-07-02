@@ -21,14 +21,14 @@ module.exports = {
             
             try {
                 const memberRoleIds = Array.from(interaction.member?.roles?.cache?.keys?.() || []);
-                const canUse = interaction.client.accessControl?.canUse(interaction.commandName, interaction.user.id, memberRoleIds) || interaction.user.id === config.ownerId;
+                const canUse = interaction.client.accessControl?.canUse(interaction.guildId, interaction.commandName, interaction.user.id, memberRoleIds) || interaction.user.id === config.ownerId;
 
                 if (!canUse) {
                     const embed = new EmbedBuilder()
                         .setTitle('❌ Permission Denied')
                         .setDescription('You do not have the required permissions to use this command.')
                         .setColor('#e74c3c');
-                    return interaction.reply({ embeds: [embed], ephemeral: true });
+                    return interaction.reply({ embeds: [embed], flags: 64 });
                 }
                 // Log command usage
                 console.log(`[SLASH CMD] ${interaction.user.tag} used /${interaction.commandName} in ${interaction.guild?.name || 'DM'}`);
@@ -46,7 +46,7 @@ module.exports = {
                 
                 const errorMessage = {
                     embeds: [errorEmbed],
-                    ephemeral: true
+                    flags: 64
                 };
                 
                 // Send error message depending on interaction state

@@ -4,9 +4,9 @@ const config = require('../config/config');
 
 class AccessControl {
     constructor() {
-        this.dataPath = path.join(__dirname, '..', 'data', 'command-access.json');
-        this.backupPath = path.join(__dirname, '..', 'data', 'command-access.backup.json');
-        this.data = { commands: {} };
+        this.dataPath = path.join(__dirname, '..', '..', 'data', 'command-access.json');
+        this.backupPath = path.join(__dirname, '..', '..', 'data', 'command-access.backup.json');
+        this.data = { guilds: {} };
         this.load();
     }
 
@@ -14,19 +14,29 @@ class AccessControl {
         return String(commandName || '').trim().toLowerCase();
     }
 
-    ensureCommandEntry(commandName) {
+    ensureCommandEntry(guildId, commandName) {
         const key = this.normalizeCommandName(commandName);
-        if (!key) return null;
+        if (!key || !guildId) return null;
 
-        if (!this.data.commands[key]) {
-            this.data.commands[key] = {
+        if (!this.data.guilds) {
+            this.data.guilds = {};
+        }
+        if (!this.data.guilds[guildId]) {
+            this.data.guilds[guildId] = { commands: {} };
+        }
+        if (!this.data.guilds[guildId].commands) {
+            this.data.guilds[guildId].commands = {};
+        }
+
+        if (!this.data.guilds[guildId].commands[key]) {
+            this.data.guilds[guildId].commands[key] = {
                 roles: [],
                 members: [],
                 updatedAt: new Date().toISOString()
             };
         }
 
-        return this.data.commands[key];
+        return this.data.guilds[guildId].commands[key];
     }
 
     loadFromFile(filePath) {
@@ -46,12 +56,28 @@ class AccessControl {
         const backup = this.loadFromFile(this.backupPath);
 
         const loaded = primary || backup;
-        if (loaded && loaded.commands && typeof loaded.commands === 'object') {
-            this.data = loaded;
-            return;
+        if (loaded) {
+            // Check if legacy schema
+            if (loaded.commands && !loaded.guilds) {
+                // Migrate to guild-scoped structure
+                const defaultGuildId = config.guildId || '1252204883533103145';
+                this.data = {
+                    guilds: {
+                        [defaultGuildId]: {
+                            commands: loaded.commands
+                        }
+                    }
+                };
+                console.log(`📦 AccessControl: Migrated legacy command permissions to guild ${defaultGuildId}`);
+                this.save();
+                return;
+            } else if (loaded.guilds && typeof loaded.guilds === 'object') {
+                this.data = loaded;
+                return;
+            }
         }
 
-        this.data = { commands: {} };
+        this.data = { guilds: {} };
     }
 
     save() {
@@ -63,8 +89,9 @@ class AccessControl {
         fs.writeFileSync(this.backupPath, serialized, 'utf8');
     }
 
-    grant(commandName, targetType, targetId) {
-        const entry = this.ensureCommandEntry(commandName);
+    grant(guildId, commandName, targetType, targetId) {
+        if (!guildId) return false;
+        const entry = this.ensureCommandEntry(guildId, commandName);
         if (!entry) return false;
 
         const normalizedId = String(targetId);
@@ -78,9 +105,11 @@ class AccessControl {
         return true;
     }
 
-    revoke(commandName, targetType, targetId) {
+    revoke(guildId, commandName, targetType, targetId) {
+        if (!guildId) return false;
         const key = this.normalizeCommandName(commandName);
-        const entry = this.data.commands[key];
+        const guildEntry = this.data.guilds?.[guildId];
+        const entry = guildEntry?.commands?.[key];
         if (!entry) return false;
 
         const normalizedId = String(targetId);
@@ -94,25 +123,28 @@ class AccessControl {
         return true;
     }
 
-    clear(commandName) {
+    clear(guildId, commandName) {
+        if (!guildId) return false;
         const key = this.normalizeCommandName(commandName);
-        if (!this.data.commands[key]) return false;
+        const guildEntry = this.data.guilds?.[guildId];
+        if (!guildEntry?.commands?.[key]) return false;
 
-        delete this.data.commands[key];
+        delete guildEntry.commands[key];
         this.save();
         return true;
     }
 
-    list(commandName) {
+    list(guildId, commandName) {
+        if (!guildId) return null;
         const key = this.normalizeCommandName(commandName);
-        return this.data.commands[key] || null;
+        return this.data.guilds?.[guildId]?.commands?.[key] || null;
     }
 
-    canUse(commandName, userId, roleIds = []) {
-        if (!commandName || !userId) return false;
+    canUse(guildId, commandName, userId, roleIds = []) {
+        if (!commandName || !userId || !guildId) return false;
         if (String(userId) === String(config.ownerId)) return true;
 
-        const entry = this.list(commandName);
+        const entry = this.list(guildId, commandName);
         if (!entry) return false;
 
         if (entry.members.includes(String(userId))) return true;
