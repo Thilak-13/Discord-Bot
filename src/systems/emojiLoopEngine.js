@@ -3,13 +3,13 @@ class EmojiLoopEngine {
         this.client = client;
         this.interval = null;
         this.runningGuilds = new Set(); // Prevent concurrent execution for the same guild
-        this.progress = {}; // guildId => { current: 0, total: 0, phase: 'emojis' }
+        this.progress = {}; // guildId => { lastItem, type, remaining, refreshed, nextRun, rateLimitTime }
     }
 
     start() {
         if (this.interval) clearInterval(this.interval);
-        // Check every minute
-        this.interval = setInterval(() => this.checkLoops().catch(console.error), 60 * 1000);
+        // Check every 10 seconds for precise execution timing
+        this.interval = setInterval(() => this.checkLoops().catch(console.error), 10 * 1000);
         // Run first check immediately
         this.checkLoops().catch(console.error);
     }
@@ -30,17 +30,16 @@ class EmojiLoopEngine {
             if (loop.status !== 'active') continue;
             if (now >= loop.next_run) {
                 // Trigger the cycle asynchronously so it doesn't block the scheduler loop
-                this.runCycle(loop.guild_id, loop.interval_minutes).catch(err => {
-                    console.error(`Error executing emoji loop for guild ${loop.guild_id}:`, err);
+                this.runCycle(loop.guild_id).catch(err => {
+                    console.error(`Error executing emoji loop step for guild ${loop.guild_id}:`, err);
                 });
             }
         }
     }
 
-    async runCycle(guildId, intervalMinutes = 60) {
+    async runCycle(guildId) {
         // Prevent concurrent runs for the same guild
         if (this.runningGuilds.has(guildId)) {
-            console.warn(`[Emoji Loop] Cycle is already running for guild ${guildId}. Skipping.`);
             return;
         }
 
@@ -48,8 +47,6 @@ class EmojiLoopEngine {
         if (!db || !db.connected) return;
 
         this.runningGuilds.add(guildId);
-        this.progress[guildId] = { current: 0, total: 0, phase: 'starting' };
-        console.log(`[Emoji Loop] Starting cache refresh cycle (safe order) for guild ${guildId}`);
 
         try {
             const guild = this.client.guilds.cache.get(guildId)
@@ -58,162 +55,203 @@ class EmojiLoopEngine {
             if (!guild) {
                 console.warn(`[Emoji Loop] Guild ${guildId} not found. Skipping.`);
                 this.runningGuilds.delete(guildId);
-                delete this.progress[guildId];
                 return;
             }
 
-            // 1. Refresh emojis (Download -> Recreate first -> Delete old second)
-            const emojis = await guild.emojis.fetch().catch(() => null);
-            if (emojis && emojis.size > 0) {
-                console.log(`[Emoji Loop] Safe-refreshing ${emojis.size} emojis in ${guild.name}`);
-                this.progress[guildId] = { current: 0, total: emojis.size, phase: 'emojis' };
+            // Load loop config from DB
+            const config = db.getEmojiLoop(guildId);
+            if (!config) {
+                this.runningGuilds.delete(guildId);
+                return;
+            }
 
-                for (const [id, emoji] of emojis) {
+            let pendingItems = [];
+            try {
+                pendingItems = JSON.parse(config.pending_items || '[]');
+            } catch (e) {
+                pendingItems = [];
+            }
+
+            // If queue is empty, rebuild it!
+            if (!Array.isArray(pendingItems) || pendingItems.length === 0) {
+                console.log(`[Emoji Loop] Queue is empty for ${guild.name}. Rebuilding circular queue (stickers first)...`);
+                
+                // Fetch stickers (prioritized first)
+                const stickers = await guild.stickers.fetch().catch(() => null);
+                const editableStickers = stickers 
+                    ? Array.from(stickers.values())
+                        .filter(s => s.editable)
+                        .sort((a, b) => a.name.localeCompare(b.name))
+                    : [];
+                
+                // Fetch emojis (second)
+                const emojis = await guild.emojis.fetch().catch(() => null);
+                const sortedEmojis = emojis
+                    ? Array.from(emojis.values())
+                        .sort((a, b) => a.name.localeCompare(b.name))
+                    : [];
+
+                pendingItems = [
+                    ...editableStickers.map(s => ({
+                        id: s.id,
+                        name: s.name,
+                        type: 'sticker',
+                        url: s.url,
+                        tags: s.tags || 'refresh',
+                        description: s.description || ''
+                    })),
+                    ...sortedEmojis.map(e => ({
+                        id: e.id,
+                        name: e.name,
+                        type: 'emoji',
+                        url: e.imageURL()
+                    }))
+                ];
+
+                if (pendingItems.length === 0) {
+                    console.log(`[Emoji Loop] No emojis or stickers found to refresh in ${guild.name}.`);
+                    // Check again in 1 hour
+                    const nextRun = Date.now() + 60 * 60 * 1000;
+                    db.updateEmojiLoopRun(guildId, Date.now(), nextRun);
+                    this.runningGuilds.delete(guildId);
+                    return;
+                }
+            }
+
+            // Get next item from the queue
+            const item = pendingItems.shift();
+            console.log(`[Emoji Loop] Processing: ${item.name} (${item.type}) in ${guild.name}. Pending queue: ${pendingItems.length} items.`);
+
+            let refreshed = false;
+            let rateLimitError = null;
+
+            if (item.type === 'emoji') {
+                // Find emoji by ID or fall back to name search
+                let emoji = guild.emojis.cache.get(item.id)
+                    || guild.emojis.cache.find(e => e.name === item.name)
+                    || await guild.emojis.fetch(item.id).catch(() => null);
+
+                if (emoji) {
                     const originalName = emoji.name;
-                    // Use imageURL() to avoid deprecation warnings
                     const emojiUrl = emoji.imageURL();
                     try {
-                        // A. Fetch image buffer with 15-second timeout
                         const controller = new AbortController();
                         const timeoutId = setTimeout(() => controller.abort(), 15000);
                         let buffer;
                         try {
                             const res = await fetch(emojiUrl, { signal: controller.signal });
-                            if (!res.ok) {
-                                throw new Error(`HTTP ${res.status}`);
-                            }
+                            if (!res.ok) throw new Error(`HTTP ${res.status}`);
                             const arrayBuffer = await res.arrayBuffer();
                             buffer = Buffer.from(arrayBuffer);
                         } finally {
                             clearTimeout(timeoutId);
                         }
 
-                        // B. Recreate emoji first (safeguard)
+                        // Create first (safeguard)
                         await guild.emojis.create({ attachment: buffer, name: originalName }, 'Emoji Loop: Cache Refresh Re-creation');
-
-                        // C. Delete original emoji only after recreation succeeds
+                        // Delete second
                         await emoji.delete('Emoji Loop: Cache Refresh Deletion');
 
                         console.log(`[Emoji Loop] Successfully refreshed emoji: ${originalName}`);
+                        refreshed = true;
                     } catch (err) {
                         console.warn(`[Emoji Loop] Failed to refresh emoji ${originalName}:`, err.message);
-                        
-                        // Detect rate limit error
                         if (err.name === 'RateLimitError' || err.retryAfter !== undefined || err.status === 429 || err.code === 429) {
-                            const retryAfter = err.retryAfter || 2400 * 1000; // default 40 minutes if missing
-                            const rateLimitError = new Error(`Rate limit hit (retry after ${Math.ceil(retryAfter / 60000)}m)`);
-                            rateLimitError.retryAfter = retryAfter;
-                            throw rateLimitError;
+                            rateLimitError = err;
                         }
                     }
-                    this.progress[guildId].current++;
-                    // Delay 3.5 seconds to respect rate limits
-                    await new Promise(resolve => setTimeout(resolve, 3500));
+                } else {
+                    console.warn(`[Emoji Loop] Emoji ${item.name} (ID: ${item.id}) no longer exists. Skipping.`);
                 }
-            }
+            } else if (item.type === 'sticker') {
+                // Find sticker by ID
+                let sticker = guild.stickers.cache.get(item.id)
+                    || await guild.stickers.fetch(item.id).catch(() => null);
 
-            // 2. Refresh stickers (Download -> Recreate first -> Delete old second)
-            const stickers = await guild.stickers.fetch().catch(() => null);
-            if (stickers && stickers.size > 0) {
-                const editableStickers = stickers.filter(s => s.editable);
-                if (editableStickers.size > 0) {
-                    console.log(`[Emoji Loop] Safe-refreshing ${editableStickers.size} stickers in ${guild.name}`);
-                    this.progress[guildId] = { current: 0, total: editableStickers.size, phase: 'stickers' };
+                if (sticker && sticker.editable) {
+                    const originalName = sticker.name;
+                    const stickerUrl = sticker.url;
+                    const stickerTags = sticker.tags || item.tags || 'refresh';
+                    const stickerDesc = sticker.description || item.description || '';
 
-                    for (const [id, sticker] of editableStickers) {
-                        const originalName = sticker.name;
-                        const stickerUrl = sticker.url;
-                        const stickerTags = sticker.tags || 'refresh';
-                        const stickerDesc = sticker.description || '';
+                    try {
+                        const controller = new AbortController();
+                        const timeoutId = setTimeout(() => controller.abort(), 15000);
+                        let buffer;
                         try {
-                            // A. Fetch sticker buffer with 15-second timeout
-                            const controller = new AbortController();
-                            const timeoutId = setTimeout(() => controller.abort(), 15000);
-                            let buffer;
-                            try {
-                                const res = await fetch(stickerUrl, { signal: controller.signal });
-                                if (!res.ok) {
-                                    throw new Error(`HTTP ${res.status}`);
-                                }
-                                const arrayBuffer = await res.arrayBuffer();
-                                buffer = Buffer.from(arrayBuffer);
-                            } finally {
-                                clearTimeout(timeoutId);
-                            }
-
-                            // B. Recreate sticker first (safeguard)
-                            await guild.stickers.create({
-                                file: buffer,
-                                name: originalName,
-                                tags: stickerTags,
-                                description: stickerDesc
-                            }, 'Sticker Loop: Cache Refresh Re-creation');
-
-                            // C. Delete original sticker only after recreation succeeds
-                            await sticker.delete('Sticker Loop: Cache Refresh Deletion');
-
-                            console.log(`[Emoji Loop] Successfully refreshed sticker: ${originalName}`);
-                        } catch (err) {
-                            console.warn(`[Emoji Loop] Failed to refresh sticker ${originalName}:`, err.message);
-
-                            // Detect rate limit error
-                            if (err.name === 'RateLimitError' || err.retryAfter !== undefined || err.status === 429 || err.code === 429) {
-                                const retryAfter = err.retryAfter || 2400 * 1000;
-                                const rateLimitError = new Error(`Rate limit hit (retry after ${Math.ceil(retryAfter / 60000)}m)`);
-                                rateLimitError.retryAfter = retryAfter;
-                                throw rateLimitError;
-                            }
+                            const res = await fetch(stickerUrl, { signal: controller.signal });
+                            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                            const arrayBuffer = await res.arrayBuffer();
+                            buffer = Buffer.from(arrayBuffer);
+                        } finally {
+                            clearTimeout(timeoutId);
                         }
-                        this.progress[guildId].current++;
-                        // Delay 3.5 seconds to respect rate limits
-                        await new Promise(resolve => setTimeout(resolve, 3500));
+
+                        // Create first (safeguard)
+                        await guild.stickers.create({
+                            file: buffer,
+                            name: originalName,
+                            tags: stickerTags,
+                            description: stickerDesc
+                        }, 'Sticker Loop: Cache Refresh Re-creation');
+                        // Delete second
+                        await sticker.delete('Sticker Loop: Cache Refresh Deletion');
+
+                        console.log(`[Emoji Loop] Successfully refreshed sticker: ${originalName}`);
+                        refreshed = true;
+                    } catch (err) {
+                        console.warn(`[Emoji Loop] Failed to refresh sticker ${originalName}:`, err.message);
+                        if (err.name === 'RateLimitError' || err.retryAfter !== undefined || err.status === 429 || err.code === 429) {
+                            rateLimitError = err;
+                        }
                     }
+                } else {
+                    console.warn(`[Emoji Loop] Sticker ${item.name} (ID: ${item.id}) no longer exists or is not editable. Skipping.`);
                 }
             }
 
-            console.log(`[Emoji Loop] Successfully finished cache refresh cycle for guild ${guild.name}`);
+            let nextRunDelay = 90 * 1000; // Default 90 seconds
 
-            // Update execution stats in database if configuration still exists
-            const currentConfig = db.getEmojiLoop(guildId);
-            if (currentConfig) {
-                const actualInterval = currentConfig.interval_minutes;
-                const nextRun = Date.now() + actualInterval * 60 * 1000;
-                db.updateEmojiLoopRun(guildId, Date.now(), nextRun);
+            if (rateLimitError) {
+                // Return item back to front of queue to retry
+                pendingItems.unshift(item);
+                
+                const retryAfterMs = rateLimitError.retryAfter || 2400 * 1000; // Cooldown (40m)
+                nextRunDelay = retryAfterMs;
+                console.error(`[Emoji Loop] Rate limit hit. Queue deferred for ${Math.ceil(retryAfterMs / 60000)} minute(s).`);
+
+                this.progress[guildId] = {
+                    lastItem: item.name,
+                    type: item.type,
+                    remaining: pendingItems.length,
+                    refreshed: false,
+                    nextRun: Date.now() + nextRunDelay,
+                    rateLimitTime: Date.now() + retryAfterMs
+                };
+            } else {
+                this.progress[guildId] = {
+                    lastItem: item.name,
+                    type: item.type,
+                    remaining: pendingItems.length,
+                    refreshed: refreshed,
+                    nextRun: Date.now() + nextRunDelay,
+                    rateLimitTime: null
+                };
             }
+
+            // Save updated pending list and schedule next run
+            const nextRunTime = Date.now() + nextRunDelay;
+            const stmt = db.db.prepare(`
+                UPDATE emoji_loops 
+                SET pending_items = ?, last_run = ?, next_run = ? 
+                WHERE guild_id = ?
+            `);
+            stmt.run(JSON.stringify(pendingItems), Date.now(), nextRunTime, guildId);
 
         } catch (error) {
             console.error(`[Emoji Loop] Error during execution cycle for guild ${guildId}:`, error);
-
-            if (error.message.includes('Rate limit hit')) {
-                const retryAfterMs = error.retryAfter || 2400 * 1000; // Default 40 minutes
-                const nextRun = Date.now() + retryAfterMs;
-
-                // Reschedule loop next_run in database
-                const currentConfig = db.getEmojiLoop(guildId);
-                if (currentConfig) {
-                    db.updateEmojiLoopRun(guildId, Date.now(), nextRun);
-                }
-
-                // Set status to rate-limited
-                this.progress[guildId] = {
-                    phase: 'rate-limited',
-                    error: error.message,
-                    retryAt: nextRun
-                };
-
-                // Retain status for 10 minutes, then clean up
-                setTimeout(() => {
-                    if (this.progress[guildId] && this.progress[guildId].phase === 'rate-limited') {
-                        delete this.progress[guildId];
-                    }
-                }, 10 * 60 * 1000);
-            }
         } finally {
             this.runningGuilds.delete(guildId);
-            // Don't delete progress if we are in rate-limited phase, as status command needs to display it
-            if (this.progress[guildId] && this.progress[guildId].phase !== 'rate-limited') {
-                delete this.progress[guildId];
-            }
         }
     }
 }

@@ -3,33 +3,27 @@ const { SlashCommandBuilder, PermissionFlagsBits, EmbedBuilder } = require('disc
 module.exports = {
     data: new SlashCommandBuilder()
         .setName('emojiloop')
-        .setDescription('Configure automatic periodic emoji and sticker cache refreshes')
+        .setDescription('Configure continuous emoji and sticker cache refreshes')
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuildExpressions)
         .addSubcommand(subcommand =>
             subcommand
                 .setName('start')
-                .setDescription('Start the periodic emoji and sticker refresh loop')
-                .addIntegerOption(option =>
-                    option.setName('interval_hours')
-                        .setDescription('Select how often to refresh (in hours, e.g. 1)')
-                        .setRequired(true)
-                        .setMinValue(1)
-                        .setMaxValue(720))
+                .setDescription('Start the continuous emoji and sticker refresh loop (1 item every 90 seconds)')
         )
         .addSubcommand(subcommand =>
             subcommand
                 .setName('stop')
-                .setDescription('Stop the periodic emoji and sticker refresh loop')
+                .setDescription('Stop the continuous emoji and sticker refresh loop')
         )
         .addSubcommand(subcommand =>
             subcommand
                 .setName('runnow')
-                .setDescription('Trigger the emoji and sticker delete-and-recreate cycle immediately once in the background')
+                .setDescription('Process the next queued emoji or sticker immediately')
         )
         .addSubcommand(subcommand =>
             subcommand
                 .setName('status')
-                .setDescription('Check the status of the emoji refresh loop for this guild')
+                .setDescription('Check status and progress of the continuous refresh queue')
         ),
 
     async execute(interaction) {
@@ -47,13 +41,19 @@ module.exports = {
 
         if (subcommand === 'start') {
             await interaction.deferReply({ flags: 64 });
-            const intervalHours = interaction.options.getInteger('interval_hours');
-            const intervalMinutes = intervalHours * 60;
+            
+            // Fixed interval of 1.5 minutes (90 seconds)
+            const intervalMinutes = 1.5; 
 
+            // Initialize/Activate loop in database
             const saved = db.saveEmojiLoop(interaction.guildId, intervalMinutes, 'active');
             if (saved) {
+                // Instantly trigger one execution to start the queue if not already running
+                if (engine) {
+                    engine.runCycle(interaction.guildId).catch(console.error);
+                }
                 return interaction.editReply({
-                    content: `✅ **Loop Started!**\nPeriodic emoji and sticker refreshes will run every **${intervalHours}** hour(s) for this guild.\n*First cycle will trigger in ${intervalHours} hour(s). Use \`/emojiloop runnow\` to run it right away.*`
+                    content: `✅ **Continuous Loop Started!**\nThe bot is now refreshing **1 sticker/emoji every 90 seconds** in a continuous circular loop (prioritizing stickers first).\n*Check current queue progress with \`/emojiloop status\`.*`
                 });
             } else {
                 return interaction.editReply({ content: '❌ Failed to start loop due to a database error.' });
@@ -71,7 +71,7 @@ module.exports = {
             const deleted = db.deleteEmojiLoop(interaction.guildId);
             if (deleted) {
                 return interaction.editReply({
-                    content: '✅ **Loop Stopped!**\nPeriodic emoji and sticker cache refreshes have been turned off.'
+                    content: '✅ **Loop Stopped!**\nContinuous emoji and sticker cache refreshes have been turned off.'
                 });
             } else {
                 return interaction.editReply({ content: '❌ Failed to stop loop due to a database error.' });
@@ -80,52 +80,56 @@ module.exports = {
 
         if (subcommand === 'status') {
             const config = db.getEmojiLoop(interaction.guildId);
-            const activeProgress = engine?.progress?.[interaction.guildId];
-
-            if (!config && !activeProgress) {
+            if (!config) {
                 return interaction.reply({
-                    content: 'ℹ️ **Not Configured**\nNo emoji refresh loop is configured for this server. Use `/emojiloop start` to activate it.',
+                    content: 'ℹ️ **Not Configured**\nNo continuous emoji loop is active for this server. Use `/emojiloop start` to activate it.',
                     flags: 64
                 });
             }
 
             await interaction.deferReply({ flags: 64 });
 
+            // Parse current queue from database
+            let pendingItems = [];
+            try {
+                pendingItems = JSON.parse(config.pending_items || '[]');
+            } catch (e) {
+                pendingItems = [];
+            }
+
             const embed = new EmbedBuilder()
-                .setTitle('✨ Emoji Refresh Loop Status')
+                .setTitle('✨ Continuous Emoji & Sticker Refresh Loop')
                 .setColor('#9b59b6')
                 .setTimestamp();
 
-            if (activeProgress) {
-                if (activeProgress.phase === 'rate-limited') {
-                    const retryTimeText = `<t:${Math.floor(activeProgress.retryAt / 1000)}:R>`;
-                    embed.addFields(
-                        { name: 'Server Name', value: `${interaction.guild.name}`, inline: true },
-                        { name: 'Current Action', value: '⚠️ **RATE LIMITED**', inline: true },
-                        { name: 'Details', value: `The bot hit Discord's emoji creation rate limit. The loop has been deferred and will resume **${retryTimeText}**.\n*Error: ${activeProgress.error}*` }
-                    );
-                } else {
-                    embed.addFields(
-                        { name: 'Server Name', value: `${interaction.guild.name}`, inline: true },
-                        { name: 'Current Action', value: '⏳ **REFRESH CYCLE IN PROGRESS**', inline: true },
-                        { name: 'Progress Status', value: `Refreshing **${activeProgress.phase}**: **${activeProgress.current} / ${activeProgress.total}** completed.` }
-                    );
-                }
-            } else {
-                const lastRunText = config.last_run > 0 
-                    ? `<t:${Math.floor(config.last_run / 1000)}:F> (<t:${Math.floor(config.last_run / 1000)}:R>)` 
-                    : 'Never';
-                const nextRunText = config.status === 'active' 
-                    ? `<t:${Math.floor(config.next_run / 1000)}:F> (<t:${Math.floor(config.next_run / 1000)}:R>)` 
-                    : 'Paused';
+            const nextRunText = config.status === 'active' 
+                ? `<t:${Math.floor(config.next_run / 1000)}:F> (<t:${Math.floor(config.next_run / 1000)}:R>)` 
+                : 'Paused';
+
+            embed.addFields(
+                { name: 'Server Name', value: `${interaction.guild.name}`, inline: true },
+                { name: 'Status', value: `${config.status.toUpperCase()}`, inline: true },
+                { name: 'Pacing Rate', value: '1 item every 90 seconds', inline: true },
+                { name: 'Queue Status', value: `**${pendingItems.length}** item(s) remaining in the current round.` },
+                { name: 'Next Queued Execution', value: nextRunText }
+            );
+
+            // Fetch progress info from in-memory engine if available
+            const progress = engine?.progress?.[interaction.guildId];
+            if (progress) {
+                const refreshedStatus = progress.rateLimitTime 
+                    ? '⚠️ Rate Limited (Deferred)' 
+                    : (progress.refreshed ? '✅ Refreshed' : '❌ Skipped/Failed');
 
                 embed.addFields(
-                    { name: 'Server Name', value: `${interaction.guild.name}`, inline: true },
-                    { name: 'Status', value: `${config.status.toUpperCase()}`, inline: true },
-                    { name: 'Interval', value: `${config.interval_minutes / 60} hour(s)`, inline: true },
-                    { name: 'Last Run', value: lastRunText },
-                    { name: 'Next Scheduled Run', value: nextRunText }
+                    { name: 'Last Processed Item', value: `**${progress.lastItem}** (${progress.type.toUpperCase()})` },
+                    { name: 'Last Refreshed Status', value: refreshedStatus }
                 );
+
+                if (progress.rateLimitTime) {
+                    const resumeTimeText = `<t:${Math.floor(progress.rateLimitTime / 1000)}:R>`;
+                    embed.addFields({ name: 'Rate Limit Cooldown', value: `Rate limit hit! Queue is deferred and will resume automatically **${resumeTimeText}**.` });
+                }
             }
 
             return interaction.editReply({ embeds: [embed] });
@@ -138,22 +142,15 @@ module.exports = {
             }
 
             if (engine.runningGuilds.has(interaction.guildId)) {
-                const activeProgress = engine.progress[interaction.guildId];
-                const progressText = activeProgress 
-                    ? `(Currently refreshing **${activeProgress.phase}**: **${activeProgress.current}/${activeProgress.total}**)` 
-                    : '';
-                return interaction.editReply({ content: `⚠️ A cache refresh cycle is already running on this server. ${progressText}` });
+                return interaction.editReply({ content: '⚠️ The engine is currently processing an item. Please wait a moment.' });
             }
 
-            // Trigger the cycle asynchronously in the background
-            const config = db.getEmojiLoop(interaction.guildId);
-            const interval = config ? config.interval_minutes : 60;
-            
-            engine.runCycle(interaction.guildId, interval).catch(err => {
-                console.error(`Error executing manual background emoji loop:`, err);
+            // Trigger a single step immediately in the background
+            engine.runCycle(interaction.guildId).catch(err => {
+                console.error(`Error executing manual background emoji loop step:`, err);
             });
 
-            return interaction.editReply({ content: '✅ **Refresh Cycle Started!** The bot is now downloading, recreating, and deleting emojis and stickers in the background. Use `/emojiloop status` to check the progress.' });
+            return interaction.editReply({ content: '✅ **Step Triggered!** The bot is processing the next queued emoji/sticker in the background right now. Use `/emojiloop status` to see details.' });
         }
     }
 };

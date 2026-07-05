@@ -96,7 +96,8 @@ class Database {
                 interval_minutes INTEGER NOT NULL,
                 status TEXT NOT NULL DEFAULT 'active',
                 last_run INTEGER DEFAULT 0,
-                next_run INTEGER NOT NULL
+                next_run INTEGER NOT NULL,
+                pending_items TEXT DEFAULT '[]'
             )`
         ];
 
@@ -116,6 +117,11 @@ class Database {
         }
         try {
             this.db.exec("ALTER TABLE autopurge_configs ADD COLUMN last_processed_message_id TEXT DEFAULT NULL");
+        } catch (error) {
+            // Ignore error if column already exists
+        }
+        try {
+            this.db.exec("ALTER TABLE emoji_loops ADD COLUMN pending_items TEXT DEFAULT '[]'");
         } catch (error) {
             // Ignore error if column already exists
         }
