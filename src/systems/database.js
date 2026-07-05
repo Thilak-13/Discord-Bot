@@ -90,6 +90,13 @@ class Database {
                 target_guild_id TEXT NOT NULL,
                 role_id TEXT NOT NULL,
                 UNIQUE(source_guild_id, target_guild_id, role_id)
+            )`,
+            `CREATE TABLE IF NOT EXISTS emoji_loops (
+                guild_id TEXT PRIMARY KEY,
+                interval_minutes INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                last_run INTEGER DEFAULT 0,
+                next_run INTEGER NOT NULL
             )`
         ];
 
@@ -594,6 +601,110 @@ class Database {
         } catch (error) {
             console.error('❌ Error getting role sync rules for target:', error.message);
             return [];
+        }
+    }
+
+    /**
+     * Save/update emoji loop config
+     */
+    saveEmojiLoop(guildId, intervalMinutes, status = 'active') {
+        try {
+            const nextRun = Date.now() + intervalMinutes * 60 * 1000;
+            const stmt = this.db.prepare(`
+                INSERT INTO emoji_loops (guild_id, interval_minutes, status, last_run, next_run)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    interval_minutes = excluded.interval_minutes,
+                    status = excluded.status,
+                    next_run = excluded.next_run
+            `);
+            stmt.run(guildId, intervalMinutes, status, 0, nextRun);
+            return true;
+        } catch (error) {
+            console.error('❌ Error saving emoji loop config:', error.message);
+            return false;
+        }
+    }
+
+    /**
+     * Get emoji loop config for a guild
+     */
+    getEmojiLoop(guildId) {
+        try {
+            const stmt = this.db.prepare(`
+                SELECT * FROM emoji_loops WHERE guild_id = ?
+            `);
+            return stmt.get(guildId) || null;
+        } catch (error) {
+            console.error('❌ Error getting emoji loop config:', error.message);
+            return null;
+        }
+    }
+
+    /**
+     * Delete emoji loop config for a guild
+     */
+    deleteEmojiLoop(guildId) {
+        try {
+            const stmt = this.db.prepare(`
+                DELETE FROM emoji_loops WHERE guild_id = ?
+            `);
+            const result = stmt.run(guildId);
+            return result.changes > 0;
+        } catch (error) {
+            console.error('❌ Error deleting emoji loop config:', error.message);
+            return false;
+        }
+    }
+
+    /**
+     * List all emoji loop configs
+     */
+    listAllEmojiLoops() {
+        try {
+            const stmt = this.db.prepare(`
+                SELECT * FROM emoji_loops
+            `);
+            return stmt.all();
+        } catch (error) {
+            console.error('❌ Error listing all emoji loops:', error.message);
+            return [];
+        }
+    }
+
+    /**
+     * Update runtime execution stats for emoji loops
+     */
+    updateEmojiLoopRun(guildId, lastRun, nextRun) {
+        try {
+            const stmt = this.db.prepare(`
+                UPDATE emoji_loops
+                SET last_run = ?, next_run = ?
+                WHERE guild_id = ?
+            `);
+            stmt.run(lastRun, nextRun, guildId);
+            return true;
+        } catch (error) {
+            console.error('❌ Error updating emoji loop run:', error.message);
+            return false;
+        }
+    }
+
+    /**
+     * Update status (active/paused) of an emoji loop
+     */
+    updateEmojiLoopStatus(guildId, status) {
+        try {
+            const stmt = this.db.prepare(`
+                UPDATE emoji_loops
+                SET status = ?
+                WHERE guild_id = ?
+            `);
+            stmt.run(status, guildId);
+            return true;
+        } catch (error) {
+            console.error('❌ Error updating emoji loop status:', error.message);
+            return false;
         }
     }
 

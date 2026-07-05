@@ -168,6 +168,14 @@ async function start() {
         } catch (err) {
             console.error('Failed to initialize AutoPurge engine:', err.message);
         }
+        // initialize emoji loop engine (refreshes emojis and stickers)
+        try {
+            const emojiLoopEngine = require('./src/systems/emojiLoopEngine');
+            await emojiLoopEngine.init(client);
+            console.log('✅ Emoji loop engine initialized');
+        } catch (err) {
+            console.error('Failed to initialize emoji loop engine:', err.message);
+        }
     } catch (error) {
         console.error('❌ Login failed:', error.message);
         process.exit(1);
