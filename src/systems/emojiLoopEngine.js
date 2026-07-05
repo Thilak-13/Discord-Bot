@@ -3,6 +3,7 @@ class EmojiLoopEngine {
         this.client = client;
         this.interval = null;
         this.runningGuilds = new Set(); // Prevent concurrent execution for the same guild
+        this.progress = {}; // guildId => { current: 0, total: 0, phase: 'emojis' }
     }
 
     start() {
@@ -47,7 +48,8 @@ class EmojiLoopEngine {
         if (!db || !db.connected) return;
 
         this.runningGuilds.add(guildId);
-        console.log(`[Emoji Loop] Starting cache refresh cycle (delete and recreate) for guild ${guildId}`);
+        this.progress[guildId] = { current: 0, total: 0, phase: 'starting' };
+        console.log(`[Emoji Loop] Starting cache refresh cycle (safe order) for guild ${guildId}`);
 
         try {
             const guild = this.client.guilds.cache.get(guildId)
@@ -56,76 +58,100 @@ class EmojiLoopEngine {
             if (!guild) {
                 console.warn(`[Emoji Loop] Guild ${guildId} not found. Skipping.`);
                 this.runningGuilds.delete(guildId);
+                delete this.progress[guildId];
                 return;
             }
 
-            // 1. Refresh emojis (Download -> Delete -> Recreate)
+            // 1. Refresh emojis (Download -> Recreate first -> Delete old second)
             const emojis = await guild.emojis.fetch().catch(() => null);
             if (emojis && emojis.size > 0) {
-                console.log(`[Emoji Loop] Deleting and recreating ${emojis.size} emojis in ${guild.name}`);
+                console.log(`[Emoji Loop] Safe-refreshing ${emojis.size} emojis in ${guild.name}`);
+                this.progress[guildId] = { current: 0, total: emojis.size, phase: 'emojis' };
+
                 for (const [id, emoji] of emojis) {
                     const originalName = emoji.name;
-                    const emojiUrl = emoji.url;
+                    // Use imageURL() to avoid deprecation warnings
+                    const emojiUrl = emoji.imageURL();
                     try {
-                        // A. Fetch image buffer first (safety measure)
-                        const res = await fetch(emojiUrl);
-                        if (!res.ok) {
-                            throw new Error(`Failed to download emoji: HTTP ${res.status}`);
+                        // A. Fetch image buffer with 15-second timeout
+                        const controller = new AbortController();
+                        const timeoutId = setTimeout(() => controller.abort(), 15000);
+                        let buffer;
+                        try {
+                            const res = await fetch(emojiUrl, { signal: controller.signal });
+                            if (!res.ok) {
+                                throw new Error(`HTTP ${res.status}`);
+                            }
+                            const arrayBuffer = await res.arrayBuffer();
+                            buffer = Buffer.from(arrayBuffer);
+                        } finally {
+                            clearTimeout(timeoutId);
                         }
-                        const arrayBuffer = await res.arrayBuffer();
-                        const buffer = Buffer.from(arrayBuffer);
 
-                        // B. Delete original emoji
+                        // B. Recreate emoji first (safeguard)
+                        await guild.emojis.create({ attachment: buffer, name: originalName }, 'Emoji Loop: Cache Refresh Re-creation');
+
+                        // C. Delete original emoji only after recreation succeeds
                         await emoji.delete('Emoji Loop: Cache Refresh Deletion');
 
-                        // C. Recreate emoji
-                        await guild.emojis.create({ attachment: buffer, name: originalName }, 'Emoji Loop: Cache Refresh Re-creation');
                         console.log(`[Emoji Loop] Successfully refreshed emoji: ${originalName}`);
                     } catch (err) {
                         console.warn(`[Emoji Loop] Failed to refresh emoji ${originalName}:`, err.message);
                     }
-                    // Wait 2.5 seconds to respect rate limits
-                    await new Promise(resolve => setTimeout(resolve, 2500));
+                    this.progress[guildId].current++;
+                    // Delay 3.5 seconds to respect rate limits
+                    await new Promise(resolve => setTimeout(resolve, 3500));
                 }
             }
 
-            // 2. Refresh stickers (Download -> Delete -> Recreate)
+            // 2. Refresh stickers (Download -> Recreate first -> Delete old second)
             const stickers = await guild.stickers.fetch().catch(() => null);
             if (stickers && stickers.size > 0) {
-                console.log(`[Emoji Loop] Deleting and recreating stickers in ${guild.name}`);
-                for (const [id, sticker] of stickers) {
-                    // Check if sticker is editable by the bot
-                    if (!sticker.editable) continue;
+                const editableStickers = stickers.filter(s => s.editable);
+                if (editableStickers.size > 0) {
+                    console.log(`[Emoji Loop] Safe-refreshing ${editableStickers.size} stickers in ${guild.name}`);
+                    this.progress[guildId] = { current: 0, total: editableStickers.size, phase: 'stickers' };
 
-                    const originalName = sticker.name;
-                    const stickerUrl = sticker.url;
-                    const stickerTags = sticker.tags || 'refresh';
-                    const stickerDesc = sticker.description || '';
-                    try {
-                        // A. Fetch sticker buffer first (safety measure)
-                        const res = await fetch(stickerUrl);
-                        if (!res.ok) {
-                            throw new Error(`Failed to download sticker: HTTP ${res.status}`);
+                    for (const [id, sticker] of editableStickers) {
+                        const originalName = sticker.name;
+                        const stickerUrl = sticker.url;
+                        const stickerTags = sticker.tags || 'refresh';
+                        const stickerDesc = sticker.description || '';
+                        try {
+                            // A. Fetch sticker buffer with 15-second timeout
+                            const controller = new AbortController();
+                            const timeoutId = setTimeout(() => controller.abort(), 15000);
+                            let buffer;
+                            try {
+                                const res = await fetch(stickerUrl, { signal: controller.signal });
+                                if (!res.ok) {
+                                    throw new Error(`HTTP ${res.status}`);
+                                }
+                                const arrayBuffer = await res.arrayBuffer();
+                                buffer = Buffer.from(arrayBuffer);
+                            } finally {
+                                clearTimeout(timeoutId);
+                            }
+
+                            // B. Recreate sticker first (safeguard)
+                            await guild.stickers.create({
+                                file: buffer,
+                                name: originalName,
+                                tags: stickerTags,
+                                description: stickerDesc
+                            }, 'Sticker Loop: Cache Refresh Re-creation');
+
+                            // C. Delete original sticker only after recreation succeeds
+                            await sticker.delete('Sticker Loop: Cache Refresh Deletion');
+
+                            console.log(`[Emoji Loop] Successfully refreshed sticker: ${originalName}`);
+                        } catch (err) {
+                            console.warn(`[Emoji Loop] Failed to refresh sticker ${originalName}:`, err.message);
                         }
-                        const arrayBuffer = await res.arrayBuffer();
-                        const buffer = Buffer.from(arrayBuffer);
-
-                        // B. Delete original sticker
-                        await sticker.delete('Sticker Loop: Cache Refresh Deletion');
-
-                        // C. Recreate sticker
-                        await guild.stickers.create({
-                            file: buffer,
-                            name: originalName,
-                            tags: stickerTags,
-                            description: stickerDesc
-                        }, 'Sticker Loop: Cache Refresh Re-creation');
-                        console.log(`[Emoji Loop] Successfully refreshed sticker: ${originalName}`);
-                    } catch (err) {
-                        console.warn(`[Emoji Loop] Failed to refresh sticker ${originalName}:`, err.message);
+                        this.progress[guildId].current++;
+                        // Delay 3.5 seconds to respect rate limits
+                        await new Promise(resolve => setTimeout(resolve, 3500));
                     }
-                    // Wait 2.5 seconds to respect rate limits
-                    await new Promise(resolve => setTimeout(resolve, 2500));
                 }
             }
 
@@ -143,6 +169,7 @@ class EmojiLoopEngine {
             console.error(`[Emoji Loop] Error during execution cycle for guild ${guildId}:`, error);
         } finally {
             this.runningGuilds.delete(guildId);
+            delete this.progress[guildId];
         }
     }
 }
